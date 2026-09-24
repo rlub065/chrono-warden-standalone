@@ -1,0 +1,13 @@
+1. Зайди на github.com и зарегистрируйся (бесплатно).
+2. Нажми "+" сверху справа -> New repository. Имя любое (например delta), Create repository.
+3. На странице репо нажми "uploading an existing file".
+4. Открой ЭТУ распакованную папку и перетащи в браузер ВСЁ, что лежит внутри
+   (папки .github и src, файлы build.gradle, gradle.properties, settings.gradle и т.д.).
+   Саму папку целиком перетаскивать не надо - только её содержимое.
+5. Внизу нажми Commit changes.
+6. Вкладка Actions -> подожди 3-6 минут, пока рядом с "Build mod" появится зелёная галочка.
+7. Открой этот запуск, внизу в Artifacts скачай delta-mod, распакуй - внутри будет delta-mod.jar
+   (сборка сама выбирает правильный файл).
+8. Поставь Minecraft Forge 1.20.1: files.minecraftforge.net -> версия 1.20.1 -> Installer -> запусти -> Install client.
+9. В лаунчере выбери профиль Forge, запусти игру один раз и закрой.
+10. Win+R -> %appdata%\.minecraft\mods -> положи туда delta-mod.jar. СТАРЫЕ файлы delta*.jar из mods удали.
