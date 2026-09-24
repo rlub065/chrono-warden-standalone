@@ -1,0 +1,56 @@
+name: Build mod
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: 8.1.1
+
+      - name: Build
+        run: gradle build --no-daemon
+
+      - name: Pick the correct (reobfuscated) jar
+        run: |
+          mkdir -p dist
+          echo "== all jars =="
+          find build -name '*.jar' | sort
+          pick() {
+            for f in $(find build -name '*.jar' ! -name '*-sources.jar' ! -name '*-javadoc.jar'); do
+              rm -f /tmp/Mod.class
+              unzip -p "$f" com/chronowarden/ChronoWardenMod.class > /tmp/Mod.class 2>/dev/null || continue
+              [ -s /tmp/Mod.class ] || continue
+              if ! grep -a -q stacksTo /tmp/Mod.class; then
+                echo "picked: $f"
+                cp "$f" dist/chrono-warden.jar
+                return 0
+              fi
+            done
+            return 1
+          }
+          if ! pick; then
+            echo "reobf jar not found, running reobfJar"
+            gradle reobfJar --no-daemon
+            find build -name '*.jar' | sort
+            pick || { echo "ERROR: no reobfuscated jar found"; exit 1; }
+          fi
+
+      - name: Upload jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: chrono-warden
+          path: dist/chrono-warden.jar
