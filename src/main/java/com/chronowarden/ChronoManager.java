@@ -49,8 +49,8 @@ public final class ChronoManager {
 
     // ================== НАСТРОЙКИ ==================
     static final int[] COOLDOWN = {80, 20, 300, 1200}; // Ball, Anchor(и то и то), Halt, TS - в тиках
-    static final int BALL_TAP_TICKS = 6;     // < 6 тиков (0.3с) = уровень 1
-    static final int BALL_HOLD_TICKS = 20;   // < 20 тиков (1с) = уровень 2, иначе уровень 3
+    static final int BALL_TAP_TICKS = 12;    // < 12 тиков (0.6с) = уровень 1
+    static final int BALL_HOLD_TICKS = 45;   // < 45 тиков (2.25с) = уровень 2, иначе уровень 3
 
     static final float BALL1_DAMAGE = 12.0f;
     static final float BALL1_RADIUS = 4.0f;
@@ -62,6 +62,10 @@ public final class ChronoManager {
 
     static final float ANCHOR_BACKLASH_FRACTION = 0.5f; // доля накопленного урона, которая при рывке бьёт врагов у точки
     static final float ANCHOR_BACKLASH_RADIUS = 5.0f;
+    static final float ANCHOR_HEAL_CHANCE = 0.6f;        // шанс, что откат полностью лечит
+    static final float ANCHOR_FAIL_BACKLASH_MULT = 2.0f; // если не повезло с хилом - отдача вдвое больше
+    static final float ANCHOR_EXPLODE_DAMAGE = 28.0f;    // Shift+Якорь: взрыв точки на месте
+    static final float ANCHOR_EXPLODE_RADIUS = 6.0f;
     static final float ANCHOR_DEATH_HP_FRACTION = 0.2f;  // возрождение: доля от максимума HP
     static final int ANCHOR_DEATH_BUFF_TICKS = 200;      // 10 с бешеного урона
 
@@ -83,6 +87,7 @@ public final class ChronoManager {
         final long[] cd = new long[4];
         final boolean[] held = new boolean[4];
         long pressTick;
+        int lastChargeLevel;
         // anchor
         boolean anchorSet;
         ServerLevel anchorLevel;
@@ -93,6 +98,8 @@ public final class ChronoManager {
         boolean tsActive;
         long tsEndTick;
         final Map<UUID, Vec3> tsFrozen = new HashMap<>();
+        final Map<UUID, Vec3> tsProjVel = new HashMap<>();
+        final Set<UUID> tsNoAiMobs = new HashSet<>();
     }
 
     private static final class Ball {
@@ -140,7 +147,7 @@ public final class ChronoManager {
     // =====================================================
     //  Ввод
     // =====================================================
-    public static void input(ServerPlayer p, int key, int action) {
+    public static void input(ServerPlayer p, int key, int action, boolean shift) {
         if (!ACTIVE.contains(p.getUUID())) {
             if (action == 0) msg(p, "§cСначала призови Хроно Вардена (ПКМ активатором)");
             return;
@@ -150,7 +157,7 @@ public final class ChronoManager {
         long now = now(p);
 
         if (key == 0) { // Ball: level решается по времени удержания
-            if (action == 0) { s.held[0] = true; s.pressTick = now; return; }
+            if (action == 0) { s.held[0] = true; s.pressTick = now; s.lastChargeLevel = 0; return; }
             s.held[0] = false;
             long hold = now - s.pressTick;
             int lvl = hold < BALL_TAP_TICKS ? 1 : (hold < BALL_HOLD_TICKS ? 2 : 3);
@@ -164,7 +171,7 @@ public final class ChronoManager {
             return;
         }
         boolean ok = switch (key) {
-            case 1 -> anchor(p, s, now);
+            case 1 -> anchor(p, s, now, shift);
             case 2 -> halt(p, now);
             case 3 -> timestop(p, s, now);
             default -> false;
@@ -257,7 +264,7 @@ public final class ChronoManager {
     // =====================================================
     //  Anchor
     // =====================================================
-    private static boolean anchor(ServerPlayer p, PState s, long now) {
+    private static boolean anchor(ServerPlayer p, PState s, long now, boolean shift) {
         ServerLevel w = p.serverLevel();
         if (!s.anchorSet) {
             s.anchorSet = true;
@@ -270,11 +277,29 @@ public final class ChronoManager {
             msg(p, "§6Якорь поставлен здесь");
             return true;
         }
-        // рывок назад
+
         Vec3 dest = s.anchorPos;
         ServerLevel destLevel = s.anchorLevel;
-        float backlash = s.damageSinceAnchor * ANCHOR_BACKLASH_FRACTION;
         s.anchorSet = false;
+
+        if (shift) {
+            // Shift+Якорь: детонация точки на месте, без отката и без хила
+            for (LivingEntity e : enemiesNear(p, dest, ANCHOR_EXPLODE_RADIUS)) {
+                e.invulnerableTime = 0;
+                e.hurt(destLevel.damageSources().magic(), ANCHOR_EXPLODE_DAMAGE);
+            }
+            destLevel.sendParticles(ParticleTypes.EXPLOSION_EMITTER, dest.x, dest.y + 0.5, dest.z, 1, 0, 0, 0, 0);
+            for (int i = 1; i <= 3; i++) ring(destLevel, dest, i * (ANCHOR_EXPLODE_RADIUS / 3.0), 0.1, (i % 2 == 0) ? DARK : GOLD_BIG, 16 + i * 6);
+            destLevel.playSound(null, dest.x, dest.y, dest.z, SoundEvents.GENERIC_EXPLODE, SoundSource.PLAYERS, 1.3f, 0.8f);
+            msg(p, "§6Якорь взорван");
+            return true;
+        }
+
+        // без Shift: откат назад. Шанс полностью вылечиться; если не повезло - хила нет, но отдача сильнее
+        float backlash = s.damageSinceAnchor * ANCHOR_BACKLASH_FRACTION;
+        boolean healRoll = p.getRandom().nextFloat() < ANCHOR_HEAL_CHANCE;
+        if (!healRoll) backlash *= ANCHOR_FAIL_BACKLASH_MULT;
+
         if (destLevel == w) {
             burst(w, p.position().add(0, 1, 0), ParticleTypes.REVERSE_PORTAL, 30);
             p.teleportTo(dest.x, dest.y, dest.z);
@@ -282,19 +307,19 @@ public final class ChronoManager {
             p.teleportTo(destLevel, dest.x, dest.y, dest.z, p.getYRot(), p.getXRot());
         }
         p.fallDistance = 0;
-        p.setHealth(p.getMaxHealth());
+        if (healRoll) p.setHealth(p.getMaxHealth());
         burst(destLevel, dest.add(0, 1, 0), ParticleTypes.REVERSE_PORTAL, 30);
-        ring(destLevel, dest, 1.2, 0.1, GOLD_BIG, 24);
+        ring(destLevel, dest, 1.2, 0.1, healRoll ? GOLD_BIG : DARK, 24);
         sound(p, SoundEvents.RESPAWN_ANCHOR_DEPLETE, 1.0f, 1.6f);
         if (backlash > 0.5f) {
             for (LivingEntity e : enemiesNear(p, dest, ANCHOR_BACKLASH_RADIUS)) {
                 e.invulnerableTime = 0;
                 e.hurt(destLevel.damageSources().magic(), backlash);
             }
-            msg(p, "§6Якорь: откат + полный хил, отдача " + (int) backlash + " урона врагам рядом");
-        } else {
-            msg(p, "§6Якорь: откат + полный хил");
         }
+        msg(p, healRoll
+                ? "§6Якорь: откат + полный хил" + (backlash > 0.5f ? ", отдача " + (int) backlash : "")
+                : "§cЯкорь: откат, хил не сработал! Отдача x2: " + (int) backlash + " урона рядом");
         return true;
     }
 
@@ -411,9 +436,20 @@ public final class ChronoManager {
         s.tsActive = true;
         s.tsEndTick = now + TS_DURATION;
         s.tsFrozen.clear();
+        s.tsProjVel.clear();
+        s.tsNoAiMobs.clear();
         for (LivingEntity e : w.getEntitiesOfClass(LivingEntity.class, p.getBoundingBox().inflate(TS_RADIUS),
                 x -> x != p && x.isAlive() && !(x instanceof ArmorStand))) {
             s.tsFrozen.put(e.getUUID(), e.position());
+            if (e instanceof Mob m && !m.isNoAi()) {
+                m.setNoAi(true); // иначе моб продолжает бить/стрелять на месте, просто дёргаясь назад
+                s.tsNoAiMobs.add(m.getUUID());
+            }
+        }
+        // уже летящие снаряды (стрелы и т.д.) тоже замирают
+        for (Projectile pr : w.getEntitiesOfClass(Projectile.class, p.getBoundingBox().inflate(TS_RADIUS), Entity::isAlive)) {
+            s.tsProjVel.put(pr.getUUID(), pr.getDeltaMovement());
+            pr.setDeltaMovement(Vec3.ZERO);
         }
         ring(w, center, TS_RADIUS, 0.1, GOLD_BIG, 60);
         w.playSound(null, center.x, center.y, center.z, SoundEvents.BEACON_POWER_SELECT, SoundSource.PLAYERS, 2.0f, 0.4f);
@@ -429,6 +465,17 @@ public final class ChronoManager {
             if (now >= s.tsEndTick) {
                 s.tsActive = false;
                 s.tsFrozen.clear();
+                ServerLevel wEnd = p.serverLevel();
+                for (UUID id : s.tsNoAiMobs) {
+                    Entity e = wEnd.getEntity(id);
+                    if (e instanceof Mob m) m.setNoAi(false);
+                }
+                s.tsNoAiMobs.clear();
+                for (Map.Entry<UUID, Vec3> en : s.tsProjVel.entrySet()) {
+                    Entity pr = wEnd.getEntity(en.getKey());
+                    if (pr != null && pr.isAlive()) pr.setDeltaMovement(en.getValue());
+                }
+                s.tsProjVel.clear();
                 msg(p, "§7Время снова идёт");
                 sound(p, SoundEvents.BEACON_DEACTIVATE, 1.2f, 1.0f);
                 continue;
@@ -442,6 +489,10 @@ public final class ChronoManager {
                 e.setDeltaMovement(Vec3.ZERO);
                 e.fallDistance = 0;
                 if (e instanceof Mob m) m.getNavigation().stop();
+            }
+            for (UUID id : s.tsProjVel.keySet()) {
+                Entity pr = w.getEntity(id);
+                if (pr != null && pr.isAlive()) pr.setDeltaMovement(Vec3.ZERO);
             }
             if (now % 5 == 0) {
                 for (Vec3 pos : s.tsFrozen.values()) {
@@ -478,8 +529,24 @@ public final class ChronoManager {
         if (now % 2 == 0) {
             for (UUID id : ACTIVE) {
                 ServerPlayer p = server.getPlayerList().getPlayer(id);
-                if (p != null && p.isAlive() && !p.isSpectator()) drawStand(p, now);
+                if (p != null && p.isAlive() && !p.isSpectator()) { drawStand(p, now); chargeIndicator(p, now); }
             }
+        }
+    }
+
+    /** Пока держишь K (Шар) - показывает текущий уровень заряда, с кольцом и звуком при смене. */
+    private static void chargeIndicator(ServerPlayer p, long now) {
+        PState s = STATE.get(p.getUUID());
+        if (s == null || !s.held[0]) return;
+        long hold = now - s.pressTick;
+        int lvl = hold < BALL_TAP_TICKS ? 1 : (hold < BALL_HOLD_TICKS ? 2 : 3);
+        String[] label = {"§fур.1 - взрыв", "§eур.2 - притяжение", "§bур.3 - тайм-стоп"};
+        msg(p, "§6Шар: " + label[lvl - 1]);
+        if (lvl != s.lastChargeLevel) {
+            s.lastChargeLevel = lvl;
+            DustParticleOptions eff = lvl == 1 ? GOLD : (lvl == 2 ? GOLD_BIG : BLUE);
+            ring(p.serverLevel(), p.position(), 0.7, 1.0, eff, 16);
+            sound(p, SoundEvents.NOTE_BLOCK_BELL.value(), 0.6f, 0.8f + lvl * 0.3f);
         }
     }
 
