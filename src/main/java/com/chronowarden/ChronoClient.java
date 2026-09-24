@@ -45,13 +45,14 @@ public class ChronoClient {
             if (Minecraft.getInstance().player == null) return;
             for (int i = 0; i < KEYS.length; i++) {
                 boolean pressed = false;
+                boolean shift = Minecraft.getInstance().options.keyShift.isDown();
                 while (KEYS[i].consumeClick()) {
                     pressed = true;
-                    ChronoWardenMod.CHANNEL.sendToServer(new ChronoMovePacket(i, 0));
+                    ChronoWardenMod.CHANNEL.sendToServer(new ChronoMovePacket(i, 0, shift));
                 }
                 boolean down = KEYS[i].isDown();
                 if (i == 0 && !down && (WAS_DOWN[i] || pressed)) {
-                    ChronoWardenMod.CHANNEL.sendToServer(new ChronoMovePacket(0, 1)); // отпустили Ball - решаем уровень
+                    ChronoWardenMod.CHANNEL.sendToServer(new ChronoMovePacket(0, 1, shift)); // отпустили Ball - решаем уровень
                 }
                 WAS_DOWN[i] = down;
             }
